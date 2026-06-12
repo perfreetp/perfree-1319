@@ -16,6 +16,38 @@ export const forecastQuerySchema = Joi.object({
   })
 });
 
+export const multiDayForecastQuerySchema = Joi.object({
+  startDate: Joi.string().isoDate().required().messages({
+    'any.required': '起始日期不能为空',
+    'string.isoDate': '起始日期格式必须为ISO标准日期'
+  }),
+  endDate: Joi.string().isoDate().required().messages({
+    'any.required': '截止日期不能为空',
+    'string.isoDate': '截止日期格式必须为ISO标准日期'
+  }),
+  holidayFactor: Joi.number().min(0.5).max(2.0).default(1.0).messages({
+    'number.min': '节假日系数不能小于0.5',
+    'number.max': '节假日系数不能大于2.0'
+  }),
+  weatherFactor: Joi.number().min(0.5).max(2.0).default(1.0).messages({
+    'number.min': '天气系数不能小于0.5',
+    'number.max': '天气系数不能大于2.0'
+  })
+});
+
+export const peakTrendQuerySchema = Joi.object({
+  startDate: Joi.string().isoDate().required().messages({
+    'any.required': '起始日期不能为空',
+    'string.isoDate': '起始日期格式必须为ISO标准日期'
+  }),
+  endDate: Joi.string().isoDate().required().messages({
+    'any.required': '截止日期不能为空',
+    'string.isoDate': '截止日期格式必须为ISO标准日期'
+  }),
+  holidayFactor: Joi.number().min(0.5).max(2.0).default(1.0),
+  weatherFactor: Joi.number().min(0.5).max(2.0).default(1.0)
+});
+
 export const suggestionIdSchema = Joi.object({
   suggestionId: Joi.number().integer().positive().required().messages({
     'any.required': '建议ID不能为空',

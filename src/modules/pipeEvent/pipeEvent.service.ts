@@ -75,28 +75,40 @@ const addTimeline = (eventId: number, action: string, operator?: string, remark?
 export const reportEvent = (eventData: EventData): number => {
   const db = getDb();
 
-  const stmt = db.prepare(`
-    INSERT INTO pipe_events (event_type, severity, location, description, reported_by, zone_id, repair_duration, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'reported')
-  `);
+  if (eventData.zone_id) {
+    const zoneStmt = db.prepare('SELECT id FROM zones WHERE id = ?');
+    const zone = zoneStmt.get(eventData.zone_id);
+    if (!zone) {
+      throw createError(400, `分区 ${eventData.zone_id} 不存在，请检查zone_id`);
+    }
+  }
 
-  const result = stmt.run(
-    eventData.event_type,
-    eventData.severity,
-    eventData.location,
-    eventData.description || null,
-    eventData.reported_by || null,
-    eventData.zone_id || null,
-    eventData.repair_duration || null
-  );
+  const transaction = db.transaction(() => {
+    const stmt = db.prepare(`
+      INSERT INTO pipe_events (event_type, severity, location, description, reported_by, zone_id, repair_duration, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'reported')
+    `);
 
-  const eventId = result.lastInsertRowid as number;
+    const result = stmt.run(
+      eventData.event_type,
+      eventData.severity,
+      eventData.location,
+      eventData.description || null,
+      eventData.reported_by || null,
+      eventData.zone_id || null,
+      eventData.repair_duration || null
+    );
 
-  addTimeline(eventId, '事件上报', eventData.reported_by, eventData.description);
+    const eventId = result.lastInsertRowid as number;
 
-  logger.info(`事件上报成功，事件ID: ${eventId}`);
+    addTimeline(eventId, '事件上报', eventData.reported_by, eventData.description);
 
-  return eventId;
+    logger.info(`事件上报成功，事件ID: ${eventId}`);
+
+    return eventId;
+  });
+
+  return transaction();
 };
 
 export const getEventList = (status?: EventStatus, severity?: EventSeverity): PipeEvent[] => {
@@ -351,6 +363,97 @@ export const updateRepairProgress = (
   logger.info(`事件 ${eventId} 状态更新为 ${progress}，操作人: ${operator}`);
 
   return { success: true };
+};
+
+export const getEventFullDetail = (eventId: number) => {
+  const db = getDb();
+
+  const event = getEventDetail(eventId);
+
+  const affectedStmt = db.prepare(`
+    SELECT ac.*, c.name as community_name, c.population, c.households, z.name as zone_name
+    FROM affected_communities ac
+    LEFT JOIN communities c ON ac.community_id = c.id
+    LEFT JOIN zones z ON c.zone_id = z.id
+    WHERE ac.event_id = ?
+    ORDER BY c.name
+  `);
+  const affected_communities = affectedStmt.all(eventId) as AffectedCommunity[];
+
+  const valveStmt = db.prepare(`
+    SELECT vo.*, v.code as valve_code, v.name as valve_name, v.location as valve_location, v.status as valve_status
+    FROM valve_operations vo
+    LEFT JOIN valves v ON vo.valve_id = v.id
+    WHERE vo.event_id = ?
+    ORDER BY vo.recommended_order
+  `);
+  const recommended_valves = valveStmt.all(eventId) as (Valve & {
+    valve_code: string;
+    valve_name: string;
+    valve_location: string;
+    valve_status: string;
+  })[];
+
+  const timelineStmt = db.prepare(`
+    SELECT * FROM event_timeline
+    WHERE event_id = ?
+    ORDER BY created_at ASC
+  `);
+  const timeline = timelineStmt.all(eventId) as EventTimeline[];
+
+  const notificationStmt = db.prepare(`
+    SELECT id, notification_type, title, target_audience, sent_at, created_at
+    FROM notifications
+    WHERE event_id = ?
+    ORDER BY created_at DESC
+  `);
+  const notifications = notificationStmt.all(eventId) as {
+    id: number;
+    notification_type: string;
+    title: string;
+    target_audience: string | null;
+    sent_at: string | null;
+    created_at: string;
+  }[];
+
+  let draft_notification: {
+    title: string;
+    content: string;
+    target_audience: string;
+  } | null = null;
+
+  if (notifications.length === 0) {
+    const location = event.zone_name ? `${event.zone_name} - ${event.location}` : event.location;
+    const estimatedRestoreTime = event.repair_duration
+      ? new Date(Date.now() + event.repair_duration * 60 * 60 * 1000).toLocaleString('zh-CN')
+      : '待定';
+    const severityText: Record<string, string> = {
+      low: '轻度', medium: '中度', high: '严重', critical: '紧急'
+    };
+
+    let targetAudience = '全体用户';
+    if (affected_communities.length > 0) {
+      const names = affected_communities.map(c => c.community_name).join('、');
+      const households = affected_communities.reduce((s, c) => s + (c.households || 0), 0);
+      targetAudience = `受影响区域: ${names}，共 ${affected_communities.length} 个小区，${households} 户`;
+    }
+
+    draft_notification = {
+      title: `【停水通知】${location} 供水临时中断`,
+      content: `由于供水管道${event.event_type === 'burst' ? '爆管' : '故障'}，${location} 区域供水受到影响。\n严重程度：${severityText[event.severity] || event.severity}\n预计恢复时间：${estimatedRestoreTime}${event.description ? '\n说明：' + event.description : ''}`,
+      target_audience: targetAudience
+    };
+  }
+
+  return {
+    event,
+    affected_communities,
+    recommended_valves,
+    current_stage: event.status,
+    timeline,
+    notifications,
+    draft_notification
+  };
 };
 
 export const getEventTimeline = (eventId: number): EventTimeline[] => {

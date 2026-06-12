@@ -18,7 +18,8 @@ import {
   createPumpRequest,
   getPumpRequests,
   approvePumpRequest,
-  addPumpControlRecord
+  addPumpControlRecord,
+  getPumpAuditLogs
 } from './pump.service';
 
 const router = Router();
@@ -83,7 +84,22 @@ router.get('/pumps/:pumpId/history', validate(pumpIdSchema, 'params'), validate(
   }
 });
 
-router.post('/pumps/requests', validate(createPumpRequestSchema, 'body'), (req: Request, res: Response, next: NextFunction) => {
+router.get('/pumps/:pumpId/audit-logs', validate(pumpIdSchema, 'params'), (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const pumpId = Number(req.params.pumpId);
+    const limit = req.query.limit ? Number(req.query.limit) : 20;
+    const logs = getPumpAuditLogs(pumpId, limit);
+    res.json({
+      code: 200,
+      message: '获取审计日志成功',
+      data: logs
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/requests', validate(createPumpRequestSchema, 'body'), (req: Request, res: Response, next: NextFunction) => {
   try {
     const { pumpId, requestType, reason, requester } = req.body;
     const requestId = createPumpRequest(pumpId, requestType, reason, requester);
@@ -97,7 +113,7 @@ router.post('/pumps/requests', validate(createPumpRequestSchema, 'body'), (req: 
   }
 });
 
-router.get('/pumps/requests', validate(pumpRequestListSchema, 'query'), (req: Request, res: Response, next: NextFunction) => {
+router.get('/requests', validate(pumpRequestListSchema, 'query'), (req: Request, res: Response, next: NextFunction) => {
   try {
     const { status } = req.query;
     const requests = getPumpRequests(status as 'pending' | 'approved' | 'rejected' | undefined);
@@ -111,7 +127,7 @@ router.get('/pumps/requests', validate(pumpRequestListSchema, 'query'), (req: Re
   }
 });
 
-router.put('/pumps/requests/:requestId/approve', validate(requestIdSchema, 'params'), validate(approvePumpRequestBodySchema, 'body'), (req: Request, res: Response, next: NextFunction) => {
+router.put('/requests/:requestId/approve', validate(requestIdSchema, 'params'), validate(approvePumpRequestBodySchema, 'body'), (req: Request, res: Response, next: NextFunction) => {
   try {
     const requestId = Number(req.params.requestId);
     const { approver, opinion, approved } = req.body;
@@ -125,7 +141,7 @@ router.put('/pumps/requests/:requestId/approve', validate(requestIdSchema, 'para
   }
 });
 
-router.post('/pumps/controls', validate(addPumpControlSchema, 'body'), (req: Request, res: Response, next: NextFunction) => {
+router.post('/controls', validate(addPumpControlSchema, 'body'), (req: Request, res: Response, next: NextFunction) => {
   try {
     const { pumpId, flowRate, pressure, power } = req.body;
     const recordId = addPumpControlRecord(pumpId, flowRate, pressure, power);

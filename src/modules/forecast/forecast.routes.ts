@@ -3,6 +3,8 @@ import { validate } from '../../middleware/validator';
 import {
   zoneIdSchema,
   forecastQuerySchema,
+  multiDayForecastQuerySchema,
+  peakTrendQuerySchema,
   suggestionIdSchema,
   suggestionListSchema,
   updateSuggestionStatusSchema,
@@ -13,12 +15,46 @@ import {
   getZoneForecast,
   getZonePeakForecast,
   getAllForecastOverview,
+  getMultiDayForecast,
+  getPeakTrend,
   getDispatchSuggestions,
   generateDispatchSuggestion,
   updateSuggestionStatus
 } from './forecast.service';
 
 const router = Router();
+
+router.get('/overview', (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const overview = getAllForecastOverview();
+    res.json({
+      code: 200,
+      message: '获取所有分区预测概览成功',
+      data: overview
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/peak-trend', validate(peakTrendQuerySchema, 'query'), (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { startDate, endDate, holidayFactor, weatherFactor } = req.query;
+    const result = getPeakTrend(
+      startDate as string,
+      endDate as string,
+      holidayFactor ? Number(holidayFactor) : 1.0,
+      weatherFactor ? Number(weatherFactor) : 1.0
+    );
+    res.json({
+      code: 200,
+      message: '获取各分区峰值趋势成功',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.get('/forecast/:zoneId', validate(zoneIdSchema, 'params'), validate(forecastQuerySchema, 'query'), (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -50,13 +86,21 @@ router.get('/forecast/:zoneId/peak', validate(zoneIdSchema, 'params'), validate(
   }
 });
 
-router.get('/forecast/all', (req: Request, res: Response, next: NextFunction) => {
+router.get('/forecast/:zoneId/multi-day', validate(zoneIdSchema, 'params'), validate(multiDayForecastQuerySchema, 'query'), (req: Request, res: Response, next: NextFunction) => {
   try {
-    const overview = getAllForecastOverview();
+    const zoneId = Number(req.params.zoneId);
+    const { startDate, endDate, holidayFactor, weatherFactor } = req.query;
+    const result = getMultiDayForecast(
+      zoneId,
+      startDate as string,
+      endDate as string,
+      holidayFactor ? Number(holidayFactor) : 1.0,
+      weatherFactor ? Number(weatherFactor) : 1.0
+    );
     res.json({
       code: 200,
-      message: '获取所有分区预测概览成功',
-      data: overview
+      message: '获取多日用水预测成功',
+      data: result
     });
   } catch (error) {
     next(error);

@@ -62,7 +62,7 @@ const EVENING_PEAK_END = 20;
 const PEAK_FLOW_THRESHOLD = 150;
 const LOW_PRESSURE_THRESHOLD = 0.2;
 
-const generateForecastFlow = (hour: number, baseFlow: number = 100): number => {
+const generateForecastFlow = (hour: number, baseFlow: number = 100, holidayFactor: number = 1.0, weatherFactor: number = 1.0): number => {
   const normalizedHour = (hour - 6) / 12;
   const base = Math.sin(normalizedHour * Math.PI) * 0.5 + 0.5;
 
@@ -78,6 +78,8 @@ const generateForecastFlow = (hour: number, baseFlow: number = 100): number => {
     flow += peakFactor * 50;
   }
 
+  flow = flow * holidayFactor * weatherFactor;
+
   return Math.round(flow * 100) / 100;
 };
 
@@ -90,11 +92,13 @@ const ensureZoneExists = (zoneId: number): void => {
   }
 };
 
-export const getZoneForecast = (zoneId: number, date?: string): WaterForecast[] => {
+export const getZoneForecast = (zoneId: number, date?: string, holidayFactor?: number, weatherFactor?: number): WaterForecast[] => {
   const db = getDb();
   ensureZoneExists(zoneId);
 
   const forecastDate = date || new Date().toISOString().split('T')[0];
+  const hf = holidayFactor ?? 1.0;
+  const wf = weatherFactor ?? 1.0;
 
   const existingStmt = db.prepare(`
     SELECT * FROM water_forecasts
@@ -103,7 +107,7 @@ export const getZoneForecast = (zoneId: number, date?: string): WaterForecast[] 
   `);
   const existingForecasts = existingStmt.all(zoneId, forecastDate) as WaterForecast[];
 
-  if (existingForecasts.length === 24) {
+  if (existingForecasts.length === 24 && hf === 1.0 && wf === 1.0) {
     return existingForecasts;
   }
 
@@ -115,18 +119,19 @@ export const getZoneForecast = (zoneId: number, date?: string): WaterForecast[] 
 
     const insertStmt = db.prepare(`
       INSERT INTO water_forecasts (zone_id, forecast_date, hour, forecast_flow, peak_flow, confidence)
-      VALUES (?, ?, ?, ?, ?, 0.9)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
 
     const forecasts: WaterForecast[] = [];
+    const confidence = Math.round((0.9 / (hf * wf)) * 100) / 100;
 
     for (let hour = 0; hour < 24; hour++) {
-      const forecastFlow = generateForecastFlow(hour);
+      const forecastFlow = generateForecastFlow(hour, 100, hf, wf);
       const isPeakHour = (hour >= MORNING_PEAK_START && hour <= MORNING_PEAK_END) ||
                          (hour >= EVENING_PEAK_START && hour <= EVENING_PEAK_END);
-      const peakFlow = isPeakHour ? forecastFlow * 1.1 : null;
+      const peakFlow = isPeakHour ? Math.round(forecastFlow * 1.1 * 100) / 100 : null;
 
-      const result = insertStmt.run(zoneId, forecastDate, hour, forecastFlow, peakFlow);
+      const result = insertStmt.run(zoneId, forecastDate, hour, forecastFlow, peakFlow, confidence);
 
       forecasts.push({
         id: result.lastInsertRowid as number,
@@ -135,7 +140,7 @@ export const getZoneForecast = (zoneId: number, date?: string): WaterForecast[] 
         hour,
         forecast_flow: forecastFlow,
         peak_flow: peakFlow,
-        confidence: 0.9,
+        confidence,
         created_at: new Date().toISOString()
       });
     }
@@ -220,6 +225,209 @@ export const getAllForecastOverview = (): ForecastOverview[] => {
   }
 
   return overviews;
+};
+
+export const getMultiDayForecast = (
+  zoneId: number,
+  startDate: string,
+  endDate: string,
+  holidayFactor: number = 1.0,
+  weatherFactor: number = 1.0
+) => {
+  ensureZoneExists(zoneId);
+
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  if (start > end) {
+    throw createError(400, '起始日期不能晚于截止日期');
+  }
+
+  const diffDays = Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+  if (diffDays > 30) {
+    throw createError(400, '预测日期范围不能超过30天');
+  }
+
+  const dailyForecasts: {
+    date: string;
+    hourly: WaterForecast[];
+  }[] = [];
+
+  for (let d = 0; d <= diffDays; d++) {
+    const currentDate = new Date(start);
+    currentDate.setDate(currentDate.getDate() + d);
+    const dateStr = currentDate.toISOString().split('T')[0];
+
+    const hourly = getZoneForecast(zoneId, dateStr, holidayFactor, weatherFactor);
+
+    dailyForecasts.push({
+      date: dateStr,
+      hourly
+    });
+  }
+
+  const series: { date: string; hour: number; forecast_flow: number; peak_flow: number | null }[] = [];
+  for (const day of dailyForecasts) {
+    for (const h of day.hourly) {
+      series.push({
+        date: day.date,
+        hour: h.hour,
+        forecast_flow: h.forecast_flow,
+        peak_flow: h.peak_flow
+      });
+    }
+  }
+
+  return {
+    zone_id: zoneId,
+    start_date: startDate,
+    end_date: endDate,
+    holiday_factor: holidayFactor,
+    weather_factor: weatherFactor,
+    daily: dailyForecasts,
+    series
+  };
+};
+
+export const getPeakTrend = (
+  startDate: string,
+  endDate: string,
+  holidayFactor: number = 1.0,
+  weatherFactor: number = 1.0
+) => {
+  const db = getDb();
+
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  if (start > end) {
+    throw createError(400, '起始日期不能晚于截止日期');
+  }
+
+  const diffDays = Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+  if (diffDays > 30) {
+    throw createError(400, '预测日期范围不能超过30天');
+  }
+
+  const zonesStmt = db.prepare('SELECT id, name FROM zones ORDER BY id');
+  const zones = zonesStmt.all() as { id: number; name: string }[];
+
+  const dates: string[] = [];
+  for (let d = 0; d <= diffDays; d++) {
+    const currentDate = new Date(start);
+    currentDate.setDate(currentDate.getDate() + d);
+    dates.push(currentDate.toISOString().split('T')[0]);
+  }
+
+  const forecastsByZoneAndDate = new Map<string, { hour: number; forecast_flow: number }[]>();
+
+  for (const zone of zones) {
+    for (const dateStr of dates) {
+      const key = `${zone.id}-${dateStr}`;
+      const existing = db.prepare(`
+        SELECT hour, forecast_flow FROM water_forecasts
+        WHERE zone_id = ? AND forecast_date = ?
+        ORDER BY hour
+      `).all(zone.id, dateStr) as { hour: number; forecast_flow: number }[];
+
+      if (existing.length === 24 && holidayFactor === 1.0 && weatherFactor === 1.0) {
+        forecastsByZoneAndDate.set(key, existing);
+      } else {
+        const hourly: { hour: number; forecast_flow: number }[] = [];
+        for (let hour = 0; hour < 24; hour++) {
+          const flow = generateForecastFlow(hour, 100, holidayFactor, weatherFactor);
+          hourly.push({ hour, forecast_flow: flow });
+        }
+        forecastsByZoneAndDate.set(key, hourly);
+      }
+    }
+  }
+
+  const zoneTrends: {
+    zone_id: number;
+    zone_name: string;
+    daily_peaks: {
+      date: string;
+      morning_peak_flow: number;
+      morning_peak_hour: number;
+      evening_peak_flow: number;
+      evening_peak_hour: number;
+      daily_max_flow: number;
+    }[];
+  }[] = [];
+
+  for (const zone of zones) {
+    const dailyPeaks: {
+      date: string;
+      morning_peak_flow: number;
+      morning_peak_hour: number;
+      evening_peak_flow: number;
+      evening_peak_hour: number;
+      daily_max_flow: number;
+    }[] = [];
+
+    for (const dateStr of dates) {
+      const key = `${zone.id}-${dateStr}`;
+      const forecasts = forecastsByZoneAndDate.get(key) || [];
+
+      const morningFlows = forecasts.filter(f => f.hour >= MORNING_PEAK_START && f.hour <= MORNING_PEAK_END);
+      const eveningFlows = forecasts.filter(f => f.hour >= EVENING_PEAK_START && f.hour <= EVENING_PEAK_END);
+
+      const morningPeak = morningFlows.length > 0
+        ? morningFlows.reduce((max, f) => f.forecast_flow > max.forecast_flow ? f : max, morningFlows[0])
+        : null;
+      const eveningPeak = eveningFlows.length > 0
+        ? eveningFlows.reduce((max, f) => f.forecast_flow > max.forecast_flow ? f : max, eveningFlows[0])
+        : null;
+
+      const allFlows = forecasts.map(f => f.forecast_flow);
+      const dailyMax = allFlows.length > 0 ? Math.max(...allFlows) : 0;
+
+      dailyPeaks.push({
+        date: dateStr,
+        morning_peak_flow: morningPeak ? Math.round(morningPeak.forecast_flow * 100) / 100 : 0,
+        morning_peak_hour: morningPeak ? morningPeak.hour : MORNING_PEAK_START,
+        evening_peak_flow: eveningPeak ? Math.round(eveningPeak.forecast_flow * 100) / 100 : 0,
+        evening_peak_hour: eveningPeak ? eveningPeak.hour : EVENING_PEAK_START,
+        daily_max_flow: Math.round(dailyMax * 100) / 100
+      });
+    }
+
+    zoneTrends.push({
+      zone_id: zone.id,
+      zone_name: zone.name,
+      daily_peaks: dailyPeaks
+    });
+  }
+
+  const chartData: {
+    dates: string[];
+    datasets: {
+      zone_id: number;
+      zone_name: string;
+      morning_peak: number[];
+      evening_peak: number[];
+      daily_max: number[];
+    }[];
+  } = {
+    dates,
+    datasets: zoneTrends.map(zt => ({
+      zone_id: zt.zone_id,
+      zone_name: zt.zone_name,
+      morning_peak: zt.daily_peaks.map(d => d.morning_peak_flow),
+      evening_peak: zt.daily_peaks.map(d => d.evening_peak_flow),
+      daily_max: zt.daily_peaks.map(d => d.daily_max_flow)
+    }))
+  };
+
+  return {
+    start_date: startDate,
+    end_date: endDate,
+    holiday_factor: holidayFactor,
+    weather_factor: weatherFactor,
+    zone_trends: zoneTrends,
+    chart_data: chartData
+  };
 };
 
 export const getDispatchSuggestions = (

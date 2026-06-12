@@ -1,5 +1,6 @@
 import { getDb } from '../../database';
 import { createError } from '../../middleware/errorHandler';
+import { logger } from '../../utils/logger';
 
 type PumpStatus = 'running' | 'standby' | 'maintenance';
 type RequestStatus = 'pending' | 'approved' | 'rejected';
@@ -47,6 +48,26 @@ interface PumpRequest {
   station_name?: string;
 }
 
+interface PumpAuditLog {
+  id: number;
+  pump_id: number;
+  request_id: number | null;
+  action: string;
+  old_status: string | null;
+  new_status: string | null;
+  operator: string;
+  remark: string | null;
+  created_at: string;
+}
+
+const addAuditLog = (pumpId: number, action: string, operator: string, oldStatus?: string, newStatus?: string, requestId?: number, remark?: string): void => {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO pump_audit_logs (pump_id, request_id, action, old_status, new_status, operator, remark)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(pumpId, requestId || null, action, oldStatus || null, newStatus || null, operator, remark || null);
+};
+
 export const getStations = (): Station[] => {
   const db = getDb();
   const stmt = db.prepare('SELECT * FROM pump_stations ORDER BY id');
@@ -72,7 +93,7 @@ export const getPumpList = (stationId?: number): PumpGroup[] => {
   return stmt.all(...params) as PumpGroup[];
 };
 
-export const getPumpDetail = (pumpId: number): PumpGroup => {
+export const getPumpDetail = (pumpId: number) => {
   const db = getDb();
   const stmt = db.prepare(`
     SELECT pg.*, ps.name as station_name
@@ -86,7 +107,19 @@ export const getPumpDetail = (pumpId: number): PumpGroup => {
     throw createError(404, '泵组不存在');
   }
 
-  return pump;
+  const recentRequestsStmt = db.prepare(`
+    SELECT pr.id, pr.request_type, pr.reason, pr.requester, pr.approver, pr.approval_opinion, pr.status, pr.created_at, pr.approved_at
+    FROM pump_requests pr
+    WHERE pr.pump_id = ?
+    ORDER BY pr.created_at DESC
+    LIMIT 5
+  `);
+  const recent_requests = recentRequestsStmt.all(pumpId);
+
+  return {
+    ...pump,
+    recent_requests
+  };
 };
 
 export const getPumpHistory = (pumpId: number, startTime?: string, endTime?: string): PumpControl[] => {
@@ -148,12 +181,20 @@ export const createPumpRequest = (
     throw createError(400, '该泵组已有待审批的申请');
   }
 
-  const insertStmt = db.prepare(`
-    INSERT INTO pump_requests (pump_id, request_type, reason, requester, status)
-    VALUES (?, ?, ?, ?, 'pending')
-  `);
-  const result = insertStmt.run(pumpId, requestType, reason || null, requester);
-  return result.lastInsertRowid as number;
+  const transaction = db.transaction(() => {
+    const insertStmt = db.prepare(`
+      INSERT INTO pump_requests (pump_id, request_type, reason, requester, status)
+      VALUES (?, ?, ?, ?, 'pending')
+    `);
+    const result = insertStmt.run(pumpId, requestType, reason || null, requester);
+    const requestId = result.lastInsertRowid as number;
+
+    addAuditLog(pumpId, `提交${requestType === 'start' ? '启动' : '停机'}申请`, requester, pump.status, pump.status, requestId, reason);
+
+    return requestId;
+  });
+
+  return transaction();
 };
 
 export const getPumpRequests = (status?: RequestStatus): PumpRequest[] => {
@@ -194,6 +235,12 @@ export const approvePumpRequest = (
     throw createError(400, '该申请已处理，无法重复审批');
   }
 
+  const pumpStmt = db.prepare('SELECT id, status FROM pump_groups WHERE id = ?');
+  const pump = pumpStmt.get(request.pump_id) as PumpGroup;
+  if (!pump) {
+    throw createError(404, '泵组不存在');
+  }
+
   const newStatus: RequestStatus = approved ? 'approved' : 'rejected';
 
   const updateRequestStmt = db.prepare(`
@@ -203,12 +250,6 @@ export const approvePumpRequest = (
   `);
 
   if (approved) {
-    const pumpStmt = db.prepare('SELECT id, status FROM pump_groups WHERE id = ?');
-    const pump = pumpStmt.get(request.pump_id) as PumpGroup;
-    if (!pump) {
-      throw createError(404, '泵组不存在');
-    }
-
     if (pump.status === 'maintenance') {
       throw createError(400, '泵组处于维护状态，无法操作');
     }
@@ -226,11 +267,31 @@ export const approvePumpRequest = (
       const flow = request.request_type === 'start' ? 100 : 0;
       const power = request.request_type === 'start' ? 50 : 0;
       updatePumpStmt.run(targetStatus, flow, power, request.pump_id);
+
+      addAuditLog(
+        request.pump_id,
+        `审批通过：${request.request_type === 'start' ? '启动' : '停机'}`,
+        approver,
+        pump.status,
+        targetStatus,
+        requestId,
+        opinion
+      );
     });
 
     transaction();
   } else {
     updateRequestStmt.run(newStatus, approver, opinion || null, requestId);
+
+    addAuditLog(
+      request.pump_id,
+      `审批驳回：${request.request_type === 'start' ? '启动' : '停机'}`,
+      approver,
+      pump.status,
+      pump.status,
+      requestId,
+      opinion
+    );
   }
 };
 
@@ -266,4 +327,22 @@ export const addPumpControlRecord = (
   });
 
   return transaction() as number;
+};
+
+export const getPumpAuditLogs = (pumpId: number, limit: number = 20): PumpAuditLog[] => {
+  const db = getDb();
+
+  const pumpStmt = db.prepare('SELECT id FROM pump_groups WHERE id = ?');
+  const pump = pumpStmt.get(pumpId);
+  if (!pump) {
+    throw createError(404, '泵组不存在');
+  }
+
+  const stmt = db.prepare(`
+    SELECT * FROM pump_audit_logs
+    WHERE pump_id = ?
+    ORDER BY created_at DESC
+    LIMIT ?
+  `);
+  return stmt.all(pumpId, limit) as PumpAuditLog[];
 };

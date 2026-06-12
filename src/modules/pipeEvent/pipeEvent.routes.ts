@@ -11,6 +11,7 @@ import {
   reportEvent,
   getEventList,
   getEventDetail,
+  getEventFullDetail,
   calculateAffectedCommunities,
   getAffectedCommunities,
   getValveRecommendation,
@@ -56,6 +57,20 @@ router.get('/events/:eventId', validate(eventIdSchema, 'params'), (req: Request,
       code: 200,
       message: '获取事件详情成功',
       data: event
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/events/:eventId/full', validate(eventIdSchema, 'params'), (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const eventId = Number(req.params.eventId);
+    const fullDetail = getEventFullDetail(eventId);
+    res.json({
+      code: 200,
+      message: '获取事件完整详情成功',
+      data: fullDetail
     });
   } catch (error) {
     next(error);

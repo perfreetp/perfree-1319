@@ -190,5 +190,19 @@ export const initSchema = (): void => {
       FOREIGN KEY (shift_id) REFERENCES shift_records(id),
       FOREIGN KEY (event_id) REFERENCES pipe_events(id)
     );
+
+    CREATE TABLE IF NOT EXISTS pump_audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pump_id INTEGER NOT NULL,
+      request_id INTEGER,
+      action TEXT NOT NULL,
+      old_status TEXT,
+      new_status TEXT,
+      operator TEXT NOT NULL,
+      remark TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (pump_id) REFERENCES pump_groups(id),
+      FOREIGN KEY (request_id) REFERENCES pump_requests(id)
+    );
   `);
 };
