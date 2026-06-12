@@ -9,7 +9,9 @@ import {
   suggestionListSchema,
   updateSuggestionStatusSchema,
   suggestionStatusEnum,
-  suggestionPriorityEnum
+  suggestionPriorityEnum,
+  zoneComparisonQuerySchema,
+  peakRiskRankingQuerySchema
 } from './forecast.validation';
 import {
   getZoneForecast,
@@ -19,12 +21,27 @@ import {
   getPeakTrend,
   getDispatchSuggestions,
   generateDispatchSuggestion,
-  updateSuggestionStatus
+  updateSuggestionStatus,
+  getZoneComparison,
+  getPeakRiskRanking
 } from './forecast.service';
 
 const router = Router();
 
 router.get('/overview', (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const overview = getAllForecastOverview();
+    res.json({
+      code: 200,
+      message: '获取所有分区预测概览成功',
+      data: overview
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/forecast/all', (req: Request, res: Response, next: NextFunction) => {
   try {
     const overview = getAllForecastOverview();
     res.json({
@@ -49,6 +66,43 @@ router.get('/peak-trend', validate(peakTrendQuerySchema, 'query'), (req: Request
     res.json({
       code: 200,
       message: '获取各分区峰值趋势成功',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/zone-comparison', validate(zoneComparisonQuerySchema, 'query'), (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { startDate, endDate, holidayFactor, weatherFactor } = req.query;
+    const result = getZoneComparison(
+      startDate as string,
+      endDate as string,
+      holidayFactor ? Number(holidayFactor) : 1.0,
+      weatherFactor ? Number(weatherFactor) : 1.0
+    );
+    res.json({
+      code: 200,
+      message: '获取分区对比数据成功',
+      data: result
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/peak-risk-ranking', validate(peakRiskRankingQuerySchema, 'query'), (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { date, holidayFactor, weatherFactor } = req.query;
+    const result = getPeakRiskRanking(
+      date as string | undefined,
+      holidayFactor ? Number(holidayFactor) : 1.0,
+      weatherFactor ? Number(weatherFactor) : 1.0
+    );
+    res.json({
+      code: 200,
+      message: '获取高峰风险排行成功',
       data: result
     });
   } catch (error) {

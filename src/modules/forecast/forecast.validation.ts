@@ -70,3 +70,24 @@ export const updateSuggestionStatusSchema = Joi.object({
     'any.only': '状态只能是 pending, adopted, rejected'
   })
 });
+
+export const zoneComparisonQuerySchema = Joi.object({
+  startDate: Joi.string().isoDate().required().messages({
+    'any.required': '起始日期不能为空',
+    'string.isoDate': '起始日期格式必须为ISO标准日期'
+  }),
+  endDate: Joi.string().isoDate().required().messages({
+    'any.required': '截止日期不能为空',
+    'string.isoDate': '截止日期格式必须为ISO标准日期'
+  }),
+  holidayFactor: Joi.number().min(0.5).max(2.0).default(1.0),
+  weatherFactor: Joi.number().min(0.5).max(2.0).default(1.0)
+});
+
+export const peakRiskRankingQuerySchema = Joi.object({
+  date: Joi.string().isoDate().optional().messages({
+    'string.isoDate': '日期格式必须为ISO标准日期'
+  }),
+  holidayFactor: Joi.number().min(0.5).max(2.0).default(1.0),
+  weatherFactor: Joi.number().min(0.5).max(2.0).default(1.0)
+});

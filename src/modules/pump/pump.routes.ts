@@ -143,8 +143,15 @@ router.put('/requests/:requestId/approve', validate(requestIdSchema, 'params'), 
 
 router.post('/controls', validate(addPumpControlSchema, 'body'), (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { pumpId, flowRate, pressure, power } = req.body;
-    const recordId = addPumpControlRecord(pumpId, flowRate, pressure, power);
+    const { pumpId, flowRate, pressure, power, requestId, operator } = req.body;
+    const recordId = addPumpControlRecord(
+      pumpId,
+      flowRate,
+      pressure,
+      power,
+      requestId ? Number(requestId) : undefined,
+      operator as string | undefined
+    );
     res.status(201).json({
       code: 201,
       message: '运行数据记录成功',

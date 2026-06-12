@@ -567,3 +567,253 @@ export const updateSuggestionStatus = (suggestionId: number, status: SuggestionS
 
   updateStmt.run(status, suggestionId);
 };
+
+export const getZoneComparison = (
+  startDate: string,
+  endDate: string,
+  holidayFactor: number = 1.0,
+  weatherFactor: number = 1.0
+) => {
+  const db = getDb();
+
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  if (start > end) {
+    throw createError(400, '起始日期不能晚于截止日期');
+  }
+
+  const diffDays = Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+  if (diffDays > 30) {
+    throw createError(400, '预测日期范围不能超过30天');
+  }
+
+  const zonesStmt = db.prepare('SELECT id, name FROM zones ORDER BY id');
+  const zones = zonesStmt.all() as { id: number; name: string }[];
+
+  const dates: string[] = [];
+  for (let d = 0; d <= diffDays; d++) {
+    const currentDate = new Date(start);
+    currentDate.setDate(currentDate.getDate() + d);
+    dates.push(currentDate.toISOString().split('T')[0]);
+  }
+
+  const zoneSummaries: {
+    zone_id: number;
+    zone_name: string;
+    date_summaries: {
+      date: string;
+      avg_flow: number;
+      peak_flow: number;
+      peak_hour: number;
+      total_flow: number;
+    }[];
+    period_avg: number;
+    period_peak: number;
+    period_total: number;
+  }[] = [];
+
+  const lineChartData: {
+    dates: string[];
+    series: {
+      zone_id: number;
+      zone_name: string;
+      hourly_flows: number[];
+    }[];
+  } = { dates: [], series: [] };
+
+  for (const zone of zones) {
+    const dateSummaries: {
+      date: string;
+      avg_flow: number;
+      peak_flow: number;
+      peak_hour: number;
+      total_flow: number;
+    }[] = [];
+
+    const allHourlyFlows: number[] = [];
+    const lineChartDates: string[] = [];
+
+    for (const dateStr of dates) {
+      const existing = db.prepare(`
+        SELECT hour, forecast_flow FROM water_forecasts
+        WHERE zone_id = ? AND forecast_date = ?
+        ORDER BY hour
+      `).all(zone.id, dateStr) as { hour: number; forecast_flow: number }[];
+
+      let hourly: { hour: number; forecast_flow: number }[];
+      if (existing.length === 24 && holidayFactor === 1.0 && weatherFactor === 1.0) {
+        hourly = existing;
+      } else {
+        hourly = [];
+        for (let hour = 0; hour < 24; hour++) {
+          hourly.push({ hour, forecast_flow: generateForecastFlow(hour, 100, holidayFactor, weatherFactor) });
+        }
+      }
+
+      const flows = hourly.map(h => h.forecast_flow);
+      const avg = flows.length > 0 ? flows.reduce((a, b) => a + b, 0) / flows.length : 0;
+      const peak = flows.length > 0 ? Math.max(...flows) : 0;
+      const peakHour = flows.indexOf(peak);
+      const total = flows.reduce((a, b) => a + b, 0);
+
+      dateSummaries.push({
+        date: dateStr,
+        avg_flow: Math.round(avg * 100) / 100,
+        peak_flow: Math.round(peak * 100) / 100,
+        peak_hour: peakHour >= 0 ? peakHour : 0,
+        total_flow: Math.round(total * 100) / 100
+      });
+
+      for (let h = 0; h < hourly.length; h++) {
+        lineChartDates.push(`${dateStr} ${String(h).padStart(2, '0')}:00`);
+        allHourlyFlows.push(Math.round(hourly[h].forecast_flow * 100) / 100);
+      }
+    }
+
+    const periodFlows = dateSummaries.map(d => d.avg_flow);
+    const periodPeaks = dateSummaries.map(d => d.peak_flow);
+    const periodTotals = dateSummaries.map(d => d.total_flow);
+
+    zoneSummaries.push({
+      zone_id: zone.id,
+      zone_name: zone.name,
+      date_summaries: dateSummaries,
+      period_avg: Math.round((periodFlows.reduce((a, b) => a + b, 0) / periodFlows.length) * 100) / 100,
+      period_peak: Math.round(Math.max(...periodPeaks) * 100) / 100,
+      period_total: Math.round(periodTotals.reduce((a, b) => a + b, 0) * 100) / 100
+    });
+
+    lineChartData.series.push({
+      zone_id: zone.id,
+      zone_name: zone.name,
+      hourly_flows: allHourlyFlows
+    });
+  }
+
+  lineChartData.dates = zones.length > 0 ? (() => {
+    const arr: string[] = [];
+    for (const dateStr of dates) {
+      for (let h = 0; h < 24; h++) {
+        arr.push(`${dateStr} ${String(h).padStart(2, '0')}:00`);
+      }
+    }
+    return arr;
+  })() : [];
+
+  return {
+    start_date: startDate,
+    end_date: endDate,
+    holiday_factor: holidayFactor,
+    weather_factor: weatherFactor,
+    zone_count: zones.length,
+    zone_summaries: zoneSummaries,
+    line_chart_data: lineChartData
+  };
+};
+
+type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
+
+export const getPeakRiskRanking = (
+  date?: string,
+  holidayFactor: number = 1.0,
+  weatherFactor: number = 1.0
+) => {
+  const db = getDb();
+  const targetDate = date || new Date().toISOString().split('T')[0];
+  const zonesStmt = db.prepare('SELECT id, name FROM zones ORDER BY id');
+  const zones = zonesStmt.all() as { id: number; name: string }[];
+
+  const PEAK_THRESHOLD_LOW = 120;
+  const PEAK_THRESHOLD_MEDIUM = 150;
+  const PEAK_THRESHOLD_HIGH = 180;
+
+  const rankings: {
+    zone_id: number;
+    zone_name: string;
+    peak_flow: number;
+    risk_level: RiskLevel;
+    risk_score: number;
+    exceed_threshold: boolean;
+    threshold: number;
+    suggestion: string;
+  }[] = [];
+
+  for (const zone of zones) {
+    const existing = db.prepare(`
+      SELECT hour, forecast_flow FROM water_forecasts
+      WHERE zone_id = ? AND forecast_date = ?
+      ORDER BY hour
+    `).all(zone.id, targetDate) as { hour: number; forecast_flow: number }[];
+
+    let hourly: { hour: number; forecast_flow: number }[];
+    if (existing.length === 24 && holidayFactor === 1.0 && weatherFactor === 1.0) {
+      hourly = existing;
+    } else {
+      hourly = [];
+      for (let hour = 0; hour < 24; hour++) {
+        hourly.push({ hour, forecast_flow: generateForecastFlow(hour, 100, holidayFactor, weatherFactor) });
+      }
+    }
+
+    const flows = hourly.map(h => h.forecast_flow);
+    const peakFlow = flows.length > 0 ? Math.round(Math.max(...flows) * 100) / 100 : 0;
+
+    let riskLevel: RiskLevel;
+    let riskScore: number;
+    let suggestion: string;
+
+    if (peakFlow >= PEAK_THRESHOLD_HIGH) {
+      riskLevel = 'critical';
+      riskScore = 100;
+      suggestion = `峰值 ${peakFlow} m³/h 超过高风险阈值，立即启动全部备用泵组并通知值班经理`;
+    } else if (peakFlow >= PEAK_THRESHOLD_MEDIUM) {
+      riskLevel = 'high';
+      riskScore = 75;
+      suggestion = `峰值 ${peakFlow} m³/h 较高，建议于早高峰前启动 1-2 台备用泵`;
+    } else if (peakFlow >= PEAK_THRESHOLD_LOW) {
+      riskLevel = 'medium';
+      riskScore = 50;
+      suggestion = `峰值 ${peakFlow} m³/h，建议关注压力变化并准备备用方案`;
+    } else {
+      riskLevel = 'low';
+      riskScore = 25;
+      suggestion = `峰值 ${peakFlow} m³/h，供水压力充足，维持现有方案即可`;
+    }
+
+    rankings.push({
+      zone_id: zone.id,
+      zone_name: zone.name,
+      peak_flow: peakFlow,
+      risk_level: riskLevel,
+      risk_score: riskScore,
+      exceed_threshold: peakFlow >= PEAK_THRESHOLD_MEDIUM,
+      threshold: PEAK_THRESHOLD_MEDIUM,
+      suggestion
+    });
+  }
+
+  rankings.sort((a, b) => b.risk_score - a.risk_score);
+
+  const counts = {
+    critical: rankings.filter(r => r.risk_level === 'critical').length,
+    high: rankings.filter(r => r.risk_level === 'high').length,
+    medium: rankings.filter(r => r.risk_level === 'medium').length,
+    low: rankings.filter(r => r.risk_level === 'low').length
+  };
+
+  const riskBarChart = {
+    zone_names: rankings.map(r => r.zone_name),
+    risk_scores: rankings.map(r => r.risk_score),
+    risk_levels: rankings.map(r => r.risk_level)
+  };
+
+  return {
+    date: targetDate,
+    holiday_factor: holidayFactor,
+    weather_factor: weatherFactor,
+    ranking_list: rankings,
+    risk_summary: counts,
+    bar_chart_data: riskBarChart
+  };
+};

@@ -60,6 +60,17 @@ interface PumpAuditLog {
   created_at: string;
 }
 
+interface LastStatusChange {
+  change_type: 'approval' | 'manual_control' | 'system';
+  source_id: number | null;
+  source_title: string | null;
+  operator: string | null;
+  from_status: string | null;
+  to_status: string | null;
+  changed_at: string | null;
+  remark: string | null;
+}
+
 const addAuditLog = (pumpId: number, action: string, operator: string, oldStatus?: string, newStatus?: string, requestId?: number, remark?: string): void => {
   const db = getDb();
   db.prepare(`
@@ -116,9 +127,40 @@ export const getPumpDetail = (pumpId: number) => {
   `);
   const recent_requests = recentRequestsStmt.all(pumpId);
 
+  const lastAuditStmt = db.prepare(`
+    SELECT * FROM pump_audit_logs
+    WHERE pump_id = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `);
+  const lastAudit = lastAuditStmt.get(pumpId) as PumpAuditLog | undefined;
+
+  let last_status_change: LastStatusChange | null = null;
+  if (lastAudit) {
+    const isApproval = lastAudit.action.startsWith('审批');
+    let sourceTitle: string | null = null;
+    if (isApproval && lastAudit.request_id) {
+      const req = db.prepare('SELECT request_type, reason FROM pump_requests WHERE id = ?').get(lastAudit.request_id) as any;
+      if (req) {
+        sourceTitle = `${req.request_type === 'start' ? '启动' : '停机'}申请${req.reason ? ' - ' + req.reason : ''}`;
+      }
+    }
+    last_status_change = {
+      change_type: isApproval ? 'approval' : 'manual_control',
+      source_id: lastAudit.request_id,
+      source_title: sourceTitle || lastAudit.action,
+      operator: lastAudit.operator,
+      from_status: lastAudit.old_status,
+      to_status: lastAudit.new_status,
+      changed_at: lastAudit.created_at,
+      remark: lastAudit.remark
+    };
+  }
+
   return {
     ...pump,
-    recent_requests
+    recent_requests,
+    last_status_change
   };
 };
 
@@ -262,11 +304,18 @@ export const approvePumpRequest = (
       WHERE id = ?
     `);
 
+    const insertControlStmt = db.prepare(`
+      INSERT INTO pump_controls (pump_id, flow_rate, pressure, power, request_id)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
     const transaction = db.transaction(() => {
       updateRequestStmt.run(newStatus, approver, opinion || null, requestId);
       const flow = request.request_type === 'start' ? 100 : 0;
       const power = request.request_type === 'start' ? 50 : 0;
+      const pressure = request.request_type === 'start' ? 0.35 : 0.1;
       updatePumpStmt.run(targetStatus, flow, power, request.pump_id);
+      insertControlStmt.run(request.pump_id, flow, pressure, power, requestId);
 
       addAuditLog(
         request.pump_id,
@@ -299,7 +348,9 @@ export const addPumpControlRecord = (
   pumpId: number,
   flowRate: number,
   pressure: number,
-  power: number
+  power: number,
+  requestId?: number,
+  operator?: string
 ): number => {
   const db = getDb();
 
@@ -311,10 +362,10 @@ export const addPumpControlRecord = (
 
   const transaction = db.transaction(() => {
     const insertStmt = db.prepare(`
-      INSERT INTO pump_controls (pump_id, flow_rate, pressure, power)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO pump_controls (pump_id, flow_rate, pressure, power, request_id)
+      VALUES (?, ?, ?, ?, ?)
     `);
-    const result = insertStmt.run(pumpId, flowRate, pressure, power);
+    const result = insertStmt.run(pumpId, flowRate, pressure, power, requestId || null);
 
     const updateStmt = db.prepare(`
       UPDATE pump_groups
@@ -322,6 +373,18 @@ export const addPumpControlRecord = (
       WHERE id = ?
     `);
     updateStmt.run(flowRate, power, pumpId);
+
+    if (operator) {
+      addAuditLog(
+        pumpId,
+        '手动运行数据采集',
+        operator,
+        pump.status,
+        pump.status,
+        requestId,
+        `流量=${flowRate},压力=${pressure},功率=${power}`
+      );
+    }
 
     return result.lastInsertRowid;
   });

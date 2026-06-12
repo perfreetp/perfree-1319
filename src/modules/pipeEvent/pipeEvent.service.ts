@@ -103,7 +103,82 @@ export const reportEvent = (eventData: EventData): number => {
 
     addTimeline(eventId, '事件上报', eventData.reported_by, eventData.description);
 
-    logger.info(`事件上报成功，事件ID: ${eventId}`);
+    let communities: any[] = [];
+    if (eventData.zone_id) {
+      const commStmt = db.prepare(`
+        SELECT c.*, z.name as zone_name
+        FROM communities c
+        LEFT JOIN zones z ON c.zone_id = z.id
+        WHERE c.zone_id = ?
+      `);
+      communities = commStmt.all(eventData.zone_id);
+    } else {
+      const commStmt = db.prepare(`
+        SELECT c.*, z.name as zone_name
+        FROM communities c
+        LEFT JOIN zones z ON c.zone_id = z.id
+      `);
+      communities = commStmt.all();
+    }
+
+    const estimatedRestoreTime = eventData.repair_duration
+      ? new Date(Date.now() + eventData.repair_duration * 60 * 60 * 1000).toISOString()
+      : null;
+
+    const affectedInsertStmt = db.prepare(`
+      INSERT INTO affected_communities (event_id, community_id, estimated_restore_time)
+      VALUES (?, ?, ?)
+    `);
+    for (const comm of communities) {
+      affectedInsertStmt.run(eventId, comm.id, estimatedRestoreTime);
+    }
+
+    addTimeline(eventId, '自动计算影响小区', 'system', `共影响 ${communities.length} 个小区`);
+
+    let valves: Valve[] = [];
+    if (eventData.zone_id) {
+      const valveStmt = db.prepare(`
+        SELECT v.*, z.name as zone_name
+        FROM valves v
+        LEFT JOIN zones z ON v.zone_id = z.id
+        WHERE v.zone_id = ? AND v.status = 'normal'
+        ORDER BY v.id
+      `);
+      valves = valveStmt.all(eventData.zone_id) as Valve[];
+    } else {
+      const valveStmt = db.prepare(`
+        SELECT v.*, z.name as zone_name
+        FROM valves v
+        LEFT JOIN zones z ON v.zone_id = z.id
+        WHERE v.status = 'normal'
+        ORDER BY v.id
+      `);
+      valves = valveStmt.all() as Valve[];
+    }
+
+    const scoredValves = valves.map((valve, index) => {
+      const distanceScore = index + 1;
+      const impactScore = valve.zone_id ? 1 : 2;
+      const priority = distanceScore * impactScore;
+      return {
+        ...valve,
+        recommended_order: index + 1,
+        priority_score: priority
+      };
+    });
+    scoredValves.sort((a, b) => (a.priority_score || 0) - (b.priority_score || 0));
+
+    const valveInsertStmt = db.prepare(`
+      INSERT INTO valve_operations (event_id, valve_id, operation, recommended_order, status)
+      VALUES (?, ?, 'close', ?, 'pending')
+    `);
+    for (const v of scoredValves) {
+      valveInsertStmt.run(eventId, v.id, v.recommended_order);
+    }
+
+    addTimeline(eventId, '自动生成关阀推荐', 'system', `推荐 ${scoredValves.length} 个阀门`);
+
+    logger.info(`事件上报成功，事件ID: ${eventId}，自动计算影响小区 ${communities.length} 个，推荐关阀 ${scoredValves.length} 个`);
 
     return eventId;
   });

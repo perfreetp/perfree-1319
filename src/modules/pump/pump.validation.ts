@@ -53,5 +53,7 @@ export const addPumpControlSchema = Joi.object({
   pumpId: Joi.number().integer().positive().required(),
   flowRate: Joi.number().min(0).required(),
   pressure: Joi.number().min(0).required(),
-  power: Joi.number().min(0).required()
+  power: Joi.number().min(0).required(),
+  requestId: Joi.number().integer().positive().optional(),
+  operator: Joi.string().min(1).max(100).optional()
 });
