@@ -5,7 +5,8 @@ import {
   getEventListSchema,
   eventIdSchema,
   executeValveBodySchema,
-  updateProgressBodySchema
+  updateProgressBodySchema,
+  confirmDisposalSchema
 } from './pipeEvent.validation';
 import {
   reportEvent,
@@ -17,7 +18,8 @@ import {
   getValveRecommendation,
   executeValveOperation,
   updateRepairProgress,
-  getEventTimeline
+  getEventTimeline,
+  confirmDisposalPlan
 } from './pipeEvent.service';
 
 const router = Router();
@@ -71,6 +73,26 @@ router.get('/events/:eventId/full', validate(eventIdSchema, 'params'), (req: Req
       code: 200,
       message: '获取事件完整详情成功',
       data: fullDetail
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/events/:eventId/confirm-disposal', validate(eventIdSchema, 'params'), validate(confirmDisposalSchema, 'body'), (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const eventId = Number(req.params.eventId);
+    const { confirmed_by, send_notification, custom_notes } = req.body;
+    const result = confirmDisposalPlan(
+      eventId,
+      confirmed_by as string,
+      send_notification === undefined ? true : Boolean(send_notification),
+      custom_notes as string | undefined
+    );
+    res.json({
+      code: 200,
+      message: '处置方案确认成功',
+      data: result
     });
   } catch (error) {
     next(error);

@@ -41,6 +41,19 @@ router.get('/overview', (req: Request, res: Response, next: NextFunction) => {
   }
 });
 
+router.get('/all', (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const overview = getAllForecastOverview();
+    res.json({
+      code: 200,
+      message: '获取所有分区预测概览成功',
+      data: overview
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/forecast/all', (req: Request, res: Response, next: NextFunction) => {
   try {
     const overview = getAllForecastOverview();

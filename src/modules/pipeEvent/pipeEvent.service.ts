@@ -543,3 +543,101 @@ export const getEventTimeline = (eventId: number): EventTimeline[] => {
   `);
   return stmt.all(eventId) as EventTimeline[];
 };
+
+export const confirmDisposalPlan = (
+  eventId: number,
+  confirmedBy: string,
+  sendNotification: boolean = true,
+  customNotes?: string
+) => {
+  const db = getDb();
+
+  const event = getEventDetail(eventId);
+  const now = new Date().toISOString();
+
+  const detail = getEventFullDetail(eventId);
+
+  const communityCount = detail.affected_communities.length;
+  const valveCount = detail.recommended_valves.length;
+  const notesParts: string[] = [`确认影响小区 ${communityCount} 个`, `确认关阀方案 ${valveCount} 个`];
+  if (customNotes) notesParts.push(customNotes);
+  const confirmRemark = notesParts.join('；');
+
+  const transaction = db.transaction(() => {
+    const updateEventStmt = db.prepare(`UPDATE pipe_events SET status = 'analyzing' WHERE id = ?`);
+    updateEventStmt.run(eventId);
+
+    const updateValvesStmt = db.prepare(`UPDATE valve_operations SET status = 'confirmed' WHERE event_id = ? AND status = 'pending'`);
+    updateValvesStmt.run(eventId);
+
+    addTimeline(eventId, '处置方案确认', confirmedBy, confirmRemark);
+
+    let notificationResult: {
+      id: number | null;
+      action: string;
+      detail: string;
+      sent_at: string | null;
+    } = { id: null, action: 'skipped', detail: '用户选择不发送通知', sent_at: null };
+
+    if (sendNotification) {
+      let notifId: number;
+
+      if (detail.notifications.length > 0) {
+        const existing = detail.notifications[0];
+        notifId = existing.id;
+        const sendStmt = db.prepare(`UPDATE notifications SET sent_at = CURRENT_TIMESTAMP WHERE id = ?`);
+        sendStmt.run(notifId);
+        notificationResult = {
+          id: notifId,
+          action: 'resent',
+          detail: `已重新发送：${existing.title}`,
+          sent_at: now
+        };
+      } else {
+        const draft = detail.draft_notification;
+        if (draft) {
+          const insertNotifStmt = db.prepare(`
+            INSERT INTO notifications (notification_type, title, content, event_id, target_audience, sent_at)
+            VALUES ('water_outage', ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          `);
+          const result = insertNotifStmt.run(draft.title, draft.content, eventId, draft.target_audience);
+          notifId = result.lastInsertRowid as number;
+          notificationResult = {
+            id: notifId,
+            action: 'sent',
+            detail: `成功发送：${draft.title}，受众：${draft.target_audience}`,
+            sent_at: now
+          };
+        } else {
+          notificationResult = {
+            id: null,
+            action: 'no_draft',
+            detail: '无可用通知草稿，跳过发送',
+            sent_at: null
+          };
+        }
+      }
+
+      addTimeline(
+        eventId,
+        '停水通知发送',
+        confirmedBy,
+        `通知ID: ${notificationResult.id}, 结果: ${notificationResult.detail}`
+      );
+    }
+
+    return {
+      event_id: eventId,
+      previous_status: event.status,
+      new_status: 'analyzing',
+      confirmed_by: confirmedBy,
+      confirmed_at: now,
+      affected_communities_confirmed: communityCount,
+      valves_confirmed: valveCount,
+      custom_notes: customNotes || null,
+      notification: notificationResult
+    };
+  });
+
+  return transaction();
+};

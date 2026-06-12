@@ -42,14 +42,114 @@ interface PeakForecast {
   threshold: number;
 }
 
+type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
+
 interface ForecastOverview {
   zone_id: number;
   zone_name: string;
-  today_avg_flow: number;
-  today_peak_flow: number;
-  peak_hour: number;
   confidence: number;
+  today: {
+    avg_flow: number;
+    peak_flow: number;
+    peak_hour: number;
+    risk_level: RiskLevel;
+    risk_score: number;
+    suggestion: string;
+  };
+  tomorrow: {
+    date: string;
+    avg_flow: number;
+    peak_flow: number;
+    peak_hour: number;
+    risk_level: RiskLevel;
+    risk_score: number;
+    suggestion: string;
+  };
+  week_summary: {
+    start_date: string;
+    end_date: string;
+    daily_max_flow: number;
+    daily_avg_flow: number;
+    highest_risk_level: RiskLevel;
+    days_high_risk: number;
+    days_medium_risk: number;
+    days_low_risk: number;
+  };
+  risk_trend: {
+    dates: string[];
+    risk_scores: number[];
+    peak_flows: number[];
+  };
 }
+
+const PEAK_LOW = 120;
+const PEAK_MEDIUM = 150;
+const PEAK_HIGH = 180;
+
+const computeRisk = (peakFlow: number): { level: RiskLevel; score: number; suggestion: string } => {
+  if (peakFlow >= PEAK_HIGH) {
+    return {
+      level: 'critical',
+      score: 100,
+      suggestion: `峰值 ${peakFlow} m³/h 达到高危阈值，建议立即启动全部备用泵组并通知值班经理`
+    };
+  } else if (peakFlow >= PEAK_MEDIUM) {
+    return {
+      level: 'high',
+      score: 75,
+      suggestion: `峰值 ${peakFlow} m³/h 较高，建议于早高峰前启动 1-2 台备用泵`
+    };
+  } else if (peakFlow >= PEAK_LOW) {
+    return {
+      level: 'medium',
+      score: 50,
+      suggestion: `峰值 ${peakFlow} m³/h，建议关注压力变化并准备备用方案`
+    };
+  } else {
+    return {
+      level: 'low',
+      score: 25,
+      suggestion: `峰值 ${peakFlow} m³/h，供水充足，维持现有方案即可`
+    };
+  }
+};
+
+const summarizeDate = (zoneId: number, dateStr: string): {
+  avg_flow: number;
+  peak_flow: number;
+  peak_hour: number;
+  risk_level: RiskLevel;
+  risk_score: number;
+  suggestion: string;
+} => {
+  const db = getDb();
+  const existing = db.prepare(`
+    SELECT hour, forecast_flow FROM water_forecasts
+    WHERE zone_id = ? AND forecast_date = ? ORDER BY hour
+  `).all(zoneId, dateStr) as { hour: number; forecast_flow: number }[];
+
+  let hourly: number[];
+  if (existing.length === 24) {
+    hourly = existing.map(h => h.forecast_flow);
+  } else {
+    hourly = [];
+    for (let h = 0; h < 24; h++) hourly.push(generateForecastFlow(h));
+  }
+
+  const avg = hourly.reduce((a, b) => a + b, 0) / hourly.length;
+  const peak = Math.max(...hourly);
+  const peakHour = hourly.indexOf(peak);
+  const risk = computeRisk(peak);
+
+  return {
+    avg_flow: Math.round(avg * 100) / 100,
+    peak_flow: Math.round(peak * 100) / 100,
+    peak_hour: peakHour >= 0 ? peakHour : 0,
+    risk_level: risk.level,
+    risk_score: risk.score,
+    suggestion: risk.suggestion
+  };
+};
 
 interface GeneratedSuggestion {
   suggestionId: number;
@@ -192,7 +292,18 @@ export const getZonePeakForecast = (zoneId: number, date?: string): PeakForecast
 
 export const getAllForecastOverview = (): ForecastOverview[] => {
   const db = getDb();
-  const today = new Date().toISOString().split('T')[0];
+  const today = new Date();
+  const todayStr = today.toISOString().split('T')[0];
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  const tomorrowStr = tomorrow.toISOString().split('T')[0];
+
+  const weekDates: string[] = [];
+  for (let d = 0; d < 7; d++) {
+    const date = new Date(today);
+    date.setDate(today.getDate() + d);
+    weekDates.push(date.toISOString().split('T')[0]);
+  }
 
   const zonesStmt = db.prepare('SELECT id, name FROM zones ORDER BY id');
   const zones = zonesStmt.all() as { id: number; name: string }[];
@@ -204,24 +315,62 @@ export const getAllForecastOverview = (): ForecastOverview[] => {
   const overviews: ForecastOverview[] = [];
 
   for (const zone of zones) {
-    const forecasts = getZoneForecast(zone.id, today);
+    const todaySum = summarizeDate(zone.id, todayStr);
+    const tomorrowSum = summarizeDate(zone.id, tomorrowStr);
 
-    if (forecasts.length > 0) {
-      const flows = forecasts.map(f => f.forecast_flow);
-      const avgFlow = flows.reduce((a, b) => a + b, 0) / flows.length;
-      const peakFlow = Math.max(...flows);
-      const peakHour = forecasts.find(f => f.forecast_flow === peakFlow)?.hour || 0;
-      const confidence = forecasts[0].confidence;
+    const weekDaily: {
+      date: string;
+      peak_flow: number;
+      avg_flow: number;
+      risk_level: RiskLevel;
+      risk_score: number;
+    }[] = [];
 
-      overviews.push({
-        zone_id: zone.id,
-        zone_name: zone.name,
-        today_avg_flow: Math.round(avgFlow * 100) / 100,
-        today_peak_flow: Math.round(peakFlow * 100) / 100,
-        peak_hour: peakHour,
-        confidence
+    for (const d of weekDates) {
+      const s = summarizeDate(zone.id, d);
+      weekDaily.push({
+        date: d,
+        peak_flow: s.peak_flow,
+        avg_flow: s.avg_flow,
+        risk_level: s.risk_level,
+        risk_score: s.risk_score
       });
     }
+
+    const weekMaxFlow = Math.max(...weekDaily.map(w => w.peak_flow));
+    const weekAvgFlow = weekDaily.reduce((a, b) => a + b.avg_flow, 0) / weekDaily.length;
+    const highestRisk = weekDaily.find(w => w.peak_flow === weekMaxFlow)?.risk_level || 'low';
+    const daysHigh = weekDaily.filter(w => w.risk_level === 'high' || w.risk_level === 'critical').length;
+    const daysMedium = weekDaily.filter(w => w.risk_level === 'medium').length;
+    const daysLow = weekDaily.filter(w => w.risk_level === 'low').length;
+
+    const confidence = 0.9;
+
+    overviews.push({
+      zone_id: zone.id,
+      zone_name: zone.name,
+      confidence,
+      today: todaySum,
+      tomorrow: {
+        date: tomorrowStr,
+        ...tomorrowSum
+      },
+      week_summary: {
+        start_date: weekDates[0],
+        end_date: weekDates[weekDates.length - 1],
+        daily_max_flow: Math.round(weekMaxFlow * 100) / 100,
+        daily_avg_flow: Math.round(weekAvgFlow * 100) / 100,
+        highest_risk_level: highestRisk,
+        days_high_risk: daysHigh,
+        days_medium_risk: daysMedium,
+        days_low_risk: daysLow
+      },
+      risk_trend: {
+        dates: weekDaily.map(w => w.date),
+        risk_scores: weekDaily.map(w => w.risk_score),
+        peak_flows: weekDaily.map(w => w.peak_flow)
+      }
+    });
   }
 
   return overviews;

@@ -54,3 +54,11 @@ export const updateProgressBodySchema = Joi.object({
   }),
   remark: Joi.string().max(500).allow('').optional()
 });
+
+export const confirmDisposalSchema = Joi.object({
+  confirmed_by: Joi.string().min(1).max(100).required().messages({
+    'any.required': '确认人不能为空'
+  }),
+  send_notification: Joi.boolean().optional().default(true),
+  custom_notes: Joi.string().max(1000).allow('').optional()
+});

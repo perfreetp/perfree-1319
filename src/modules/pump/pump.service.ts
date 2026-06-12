@@ -71,6 +71,40 @@ interface LastStatusChange {
   remark: string | null;
 }
 
+interface ApprovalChainStep {
+  step: 'request' | 'approval' | 'runtime_record';
+  order: number;
+  record_id: number | null;
+  title: string;
+  operator: string | null;
+  time: string | null;
+  summary: string;
+}
+
+interface ApprovalChain {
+  chain: ApprovalChainStep[];
+  request: {
+    id: number | null;
+    type: string | null;
+    reason: string | null;
+    requester: string | null;
+    created_at: string | null;
+  };
+  approval: {
+    status: string | null;
+    approver: string | null;
+    opinion: string | null;
+    approved_at: string | null;
+  };
+  runtime_record: {
+    id: number | null;
+    flow_rate: number | null;
+    pressure: number | null;
+    power: number | null;
+    timestamp: string | null;
+  };
+}
+
 const addAuditLog = (pumpId: number, action: string, operator: string, oldStatus?: string, newStatus?: string, requestId?: number, remark?: string): void => {
   const db = getDb();
   db.prepare(`
@@ -157,10 +191,82 @@ export const getPumpDetail = (pumpId: number) => {
     };
   }
 
+  const approvalChain: ApprovalChain = {
+    chain: [],
+    request: { id: null, type: null, reason: null, requester: null, created_at: null },
+    approval: { status: null, approver: null, opinion: null, approved_at: null },
+    runtime_record: { id: null, flow_rate: null, pressure: null, power: null, timestamp: null }
+  };
+
+  const relatedRequest = lastAudit && lastAudit.request_id
+    ? db.prepare('SELECT * FROM pump_requests WHERE id = ?').get(lastAudit.request_id) as any
+    : null;
+
+  if (relatedRequest) {
+    approvalChain.request = {
+      id: relatedRequest.id,
+      type: relatedRequest.request_type,
+      reason: relatedRequest.reason,
+      requester: relatedRequest.requester,
+      created_at: relatedRequest.created_at
+    };
+    approvalChain.chain.push({
+      step: 'request',
+      order: 1,
+      record_id: relatedRequest.id,
+      title: `${relatedRequest.request_type === 'start' ? '启动' : '停机'}申请`,
+      operator: relatedRequest.requester,
+      time: relatedRequest.created_at,
+      summary: `${relatedRequest.requester} 提交${relatedRequest.request_type === 'start' ? '启动' : '停机'}申请${relatedRequest.reason ? '：' + relatedRequest.reason : ''}`
+    });
+
+    if (relatedRequest.status !== 'pending') {
+      approvalChain.approval = {
+        status: relatedRequest.status,
+        approver: relatedRequest.approver,
+        opinion: relatedRequest.approval_opinion,
+        approved_at: relatedRequest.approved_at
+      };
+      const statusText = relatedRequest.status === 'approved' ? '审批通过' : '审批驳回';
+      approvalChain.chain.push({
+        step: 'approval',
+        order: 2,
+        record_id: relatedRequest.id,
+        title: statusText,
+        operator: relatedRequest.approver,
+        time: relatedRequest.approved_at,
+        summary: `${relatedRequest.approver || '系统'} ${statusText.toLowerCase()}${relatedRequest.approval_opinion ? '：' + relatedRequest.approval_opinion : ''}`
+      });
+    }
+
+    const runtimeRec = db.prepare(`
+      SELECT * FROM pump_controls WHERE request_id = ? ORDER BY id DESC LIMIT 1
+    `).get(relatedRequest.id) as any;
+    if (runtimeRec) {
+      approvalChain.runtime_record = {
+        id: runtimeRec.id,
+        flow_rate: runtimeRec.flow_rate,
+        pressure: runtimeRec.pressure,
+        power: runtimeRec.power,
+        timestamp: runtimeRec.timestamp
+      };
+      approvalChain.chain.push({
+        step: 'runtime_record',
+        order: 3,
+        record_id: runtimeRec.id,
+        title: '实际运行记录',
+        operator: null,
+        time: runtimeRec.timestamp,
+        summary: `流量=${runtimeRec.flow_rate},压力=${runtimeRec.pressure},功率=${runtimeRec.power}`
+      });
+    }
+  }
+
   return {
     ...pump,
     recent_requests,
-    last_status_change
+    last_status_change,
+    approval_chain: approvalChain
   };
 };
 
