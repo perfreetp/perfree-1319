@@ -1,7 +1,7 @@
 import Joi from 'joi';
 
 export const suggestionStatusEnum = ['pending', 'adopted', 'rejected'] as const;
-export const suggestionPriorityEnum = ['high', 'medium', 'low'] as const;
+export const suggestionPriorityEnum = ['critical', 'high', 'medium', 'low'] as const;
 
 export const zoneIdSchema = Joi.object({
   zoneId: Joi.number().integer().positive().required().messages({

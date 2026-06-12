@@ -615,16 +615,41 @@ export const getDispatchSuggestions = (
 
 export const generateDispatchSuggestion = (): GeneratedSuggestion => {
   const db = getDb();
-  const today = new Date().toISOString().split('T')[0];
 
   const overviews = getAllForecastOverview();
   const suggestions: { type: string; content: string; priority: SuggestionPriority }[] = [];
 
   for (const overview of overviews) {
-    if (overview.today_peak_flow > PEAK_FLOW_THRESHOLD) {
+    const today = overview.today;
+    const tomorrow = overview.tomorrow;
+
+    if (today.risk_level === 'critical') {
       suggestions.push({
         type: 'peak_warning',
-        content: `分区「${overview.zone_name}」预测今日峰值流量 ${overview.today_peak_flow} m³/h 超过阈值 ${PEAK_FLOW_THRESHOLD} m³/h，建议于 ${overview.peak_hour}:00 前启动备用泵组`,
+        content: `分区「${overview.zone_name}」今日峰值 ${today.peak_flow} m³/h（${today.peak_hour}:00）达高危阈值，${today.suggestion}`,
+        priority: 'critical'
+      });
+    } else if (today.risk_level === 'high') {
+      suggestions.push({
+        type: 'peak_warning',
+        content: `分区「${overview.zone_name}」今日峰值 ${today.peak_flow} m³/h（${today.peak_hour}:00）较高，${today.suggestion}`,
+        priority: 'high'
+      });
+    }
+
+    if (tomorrow.risk_level === 'critical' || tomorrow.risk_level === 'high') {
+      suggestions.push({
+        type: 'peak_warning',
+        content: `分区「${overview.zone_name}」明日（${tomorrow.date}）预测峰值 ${tomorrow.peak_flow} m³/h，风险等级 ${tomorrow.risk_level}，${tomorrow.suggestion}`,
+        priority: tomorrow.risk_level === 'critical' ? 'high' : 'medium'
+      });
+    }
+
+    const week = overview.week_summary;
+    if (week.days_high_risk >= 3) {
+      suggestions.push({
+        type: 'peak_warning',
+        content: `分区「${overview.zone_name}」未来一周有 ${week.days_high_risk} 天高风险，周均流量 ${week.daily_avg_flow} m³/h，建议评估长期增容方案`,
         priority: 'high'
       });
     }
@@ -656,7 +681,7 @@ export const generateDispatchSuggestion = (): GeneratedSuggestion => {
   }
 
   const avgFlow = overviews.length > 0
-    ? overviews.reduce((a, b) => a + b.today_avg_flow, 0) / overviews.length
+    ? overviews.reduce((a, b) => a + b.today.avg_flow, 0) / overviews.length
     : 0;
 
   if (avgFlow > 0) {
@@ -860,8 +885,6 @@ export const getZoneComparison = (
     line_chart_data: lineChartData
   };
 };
-
-type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 
 export const getPeakRiskRanking = (
   date?: string,
